@@ -26,7 +26,8 @@ class VideoRepository(private val context: Context) {
             MediaStore.Video.Media.SIZE,
             MediaStore.Video.Media.DATE_ADDED,
             MediaStore.Video.Media.WIDTH,
-            MediaStore.Video.Media.HEIGHT
+            MediaStore.Video.Media.HEIGHT,
+            MediaStore.Video.Media.BUCKET_DISPLAY_NAME
         )
 
         val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
@@ -41,6 +42,7 @@ class VideoRepository(private val context: Context) {
             val dateAddedCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
             val widthCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.WIDTH)
             val heightCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.HEIGHT)
+            val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
 
             while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
@@ -50,9 +52,9 @@ class VideoRepository(private val context: Context) {
                 val dateAdded = cursor.getLong(dateAddedCol)
                 val width = cursor.getInt(widthCol)
                 val height = cursor.getInt(heightCol)
+                val folder = cursor.getString(bucketCol) ?: "Unknown"
 
                 val videoUri = ContentUris.withAppendedId(collection, id)
-                val thumbUri = ContentUris.withAppendedId(collection, id)
 
                 videos.add(
                     Video(
@@ -64,7 +66,8 @@ class VideoRepository(private val context: Context) {
                         width = width,
                         height = height,
                         uri = videoUri,
-                        thumbnailUri = thumbUri
+                        thumbnailUri = videoUri,
+                        folderName = folder
                     )
                 )
             }
