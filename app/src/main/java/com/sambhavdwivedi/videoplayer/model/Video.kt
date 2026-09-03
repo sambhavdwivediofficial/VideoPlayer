@@ -11,5 +11,6 @@ data class Video(
     val width: Int,
     val height: Int,
     val uri: Uri,
-    val thumbnailUri: Uri
+    val thumbnailUri: Uri,
+    val folderName: String
 )
