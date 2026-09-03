@@ -20,7 +20,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.sambhavdwivedi.videoplayer.data.VideoDeleteUtil
+import com.sambhavdwivedi.videoplayer.model.Video
 import com.sambhavdwivedi.videoplayer.ui.NowPlayingVideoScreen
 import com.sambhavdwivedi.videoplayer.ui.VideoGridScreen
 import com.sambhavdwivedi.videoplayer.ui.VideoViewModel
@@ -43,25 +46,41 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun VideoApp() {
     val viewModel: VideoViewModel = viewModel()
-    var hasPermission by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     var showPlayer by rememberSaveable { mutableStateOf(false) }
+    var pendingDeleteIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
 
-    val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        Manifest.permission.READ_MEDIA_VIDEO
-    } else {
-        Manifest.permission.READ_EXTERNAL_STORAGE
+    val requiredPermissions = remember {
+        buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.READ_MEDIA_VIDEO)
+            } else {
+                add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        }.toTypedArray()
     }
 
-    val launcher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasPermission = granted
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) {
         viewModel.loadVideos()
+    }
+
+    val deleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            viewModel.removeDeletedVideos(pendingDeleteIds)
+        }
+        pendingDeleteIds = emptySet()
     }
 
     LaunchedEffect(Unit) {
         viewModel.loadVideos()
-        launcher.launch(permission)
+        permissionLauncher.launch(requiredPermissions)
     }
 
     BackHandler(enabled = showPlayer) {
@@ -73,7 +92,22 @@ fun VideoApp() {
     } else {
         Scaffold(containerColor = Color(0xFF080808)) { innerPadding ->
             Box(modifier = Modifier.padding(innerPadding)) {
-                VideoGridScreen(viewModel = viewModel, onVideoOpen = { showPlayer = true })
+                VideoGridScreen(
+                    viewModel = viewModel,
+                    onVideoOpen = { showPlayer = true },
+                    onDeleteVideos = { toDelete ->
+                        pendingDeleteIds = toDelete.map { it.id }.toSet()
+                        VideoDeleteUtil.requestDelete(
+                            context = context,
+                            uris = toDelete.map { it.uri },
+                            launchIntentSender = { request -> deleteLauncher.launch(request) },
+                            onImmediateSuccess = {
+                                viewModel.removeDeletedVideos(pendingDeleteIds)
+                                pendingDeleteIds = emptySet()
+                            }
+                        )
+                    }
+                )
             }
         }
     }
