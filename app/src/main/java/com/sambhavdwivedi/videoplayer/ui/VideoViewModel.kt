@@ -6,7 +6,6 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.SeekParameters
 import coil.request.ImageRequest
 import com.sambhavdwivedi.videoplayer.data.VideoRepository
 import com.sambhavdwivedi.videoplayer.model.Video
@@ -30,9 +29,7 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = VideoRepository(application)
 
-    val player: ExoPlayer = ExoPlayer.Builder(application).build().apply {
-        setSeekParameters(SeekParameters.EXACT)
-    }
+    val player: ExoPlayer = ExoPlayer.Builder(application).build()
 
     private val _allVideos = MutableStateFlow<List<Video>>(emptyList())
 
@@ -73,6 +70,9 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     private val _positionMs = MutableStateFlow(0L)
     val positionMs: StateFlow<Long> = _positionMs.asStateFlow()
 
+    // Seeded from MediaStore metadata the instant a video starts, and only ever
+    // overwritten by a POSITIVE value from the player — never reset to 0/unknown.
+    // This is the actual fix: a stale 0 here was making every seek land on 0.
     private val _durationMs = MutableStateFlow(0L)
     val durationMs: StateFlow<Long> = _durationMs.asStateFlow()
 
@@ -87,13 +87,6 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
     private val lastPositions = mutableMapOf<Long, Long>()
 
-    // A seek is "pending" from the moment we call seekTo until ExoPlayer itself
-    // confirms it via onPositionDiscontinuity(SEEK). While pending, the polling
-    // loop below trusts the target we set instead of the player's own position,
-    // so the progress bar can never briefly show a stale/older value.
-    private var pendingSeekTarget: Long = -1L
-    private var pendingSeekDeadline: Long = 0L
-
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _isPlaying.value = isPlaying
@@ -102,36 +95,19 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
         override fun onPlaybackStateChanged(playbackState: Int) {
             _isBuffering.value = playbackState == Player.STATE_BUFFERING
         }
-
-        override fun onPositionDiscontinuity(
-            oldPosition: Player.PositionInfo,
-            newPosition: Player.PositionInfo,
-            reason: Int
-        ) {
-            if (reason == Player.DISCONTINUITY_REASON_SEEK) {
-                pendingSeekTarget = -1L
-                _positionMs.value = newPosition.positionMs.coerceAtLeast(0)
-            }
-        }
     }
 
     init {
         player.addListener(playerListener)
         viewModelScope.launch {
             while (true) {
-                val now = System.currentTimeMillis()
-                if (pendingSeekTarget >= 0L) {
-                    if (now > pendingSeekDeadline) {
-                        // Safety net only — normally onPositionDiscontinuity clears this first.
-                        pendingSeekTarget = -1L
-                        _positionMs.value = player.currentPosition.coerceAtLeast(0)
-                    } else {
-                        _positionMs.value = pendingSeekTarget
-                    }
-                } else {
-                    _positionMs.value = player.currentPosition.coerceAtLeast(0)
+                _positionMs.value = player.currentPosition.coerceAtLeast(0)
+
+                val playerDuration = player.duration
+                if (playerDuration > 0) {
+                    _durationMs.value = playerDuration
                 }
-                _durationMs.value = player.duration.coerceAtLeast(0)
+
                 delay(200)
             }
         }
@@ -205,10 +181,14 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun playVideo(video: Video) {
-        pendingSeekTarget = -1L
         _currentVideo.value = video
         updateNavAvailability()
-        val resumeFrom = lastPositions[video.id] ?: 0L
+
+        // Seed duration from MediaStore metadata immediately — don't wait for
+        // the player to become STATE_READY before the slider/seek math works.
+        _durationMs.value = video.durationMs
+
+        val resumeFrom = (lastPositions[video.id] ?: 0L).coerceIn(0L, (video.durationMs - 500).coerceAtLeast(0L))
         val mediaItem = MediaItem.fromUri(video.uri)
         player.setMediaItem(mediaItem, resumeFrom)
         player.prepare()
@@ -240,19 +220,15 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun seekTo(ms: Long) {
-        val target = ms.coerceAtLeast(0)
-        pendingSeekTarget = target
-        pendingSeekDeadline = System.currentTimeMillis() + 4000
+        val safeDuration = _durationMs.value
+        val target = if (safeDuration > 0) ms.coerceIn(0L, safeDuration - 200) else ms.coerceAtLeast(0)
         player.seekTo(target)
         _positionMs.value = target
     }
 
     fun seekBy(deltaMs: Long) {
-        val target = (player.currentPosition + deltaMs).coerceAtLeast(0)
-        pendingSeekTarget = target
-        pendingSeekDeadline = System.currentTimeMillis() + 4000
-        player.seekTo(target)
-        _positionMs.value = target
+        val current = player.currentPosition.coerceAtLeast(0)
+        seekTo(current + deltaMs)
     }
 
     fun setPlaybackSpeed(speed: Float) {
@@ -267,7 +243,6 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopPlayback() {
         _currentVideo.value?.let { lastPositions[it.id] = player.currentPosition }
-        pendingSeekTarget = -1L
         player.stop()
         player.clearMediaItems()
         _currentVideo.value = null
