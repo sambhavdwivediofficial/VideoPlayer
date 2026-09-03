@@ -13,12 +13,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+
+enum class SortMode { DATE_ADDED, NAME, DURATION, SIZE }
 
 class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -26,11 +31,32 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
     val player: ExoPlayer = ExoPlayer.Builder(application).build()
 
-    private val _videos = MutableStateFlow<List<Video>>(emptyList())
-    val videos: StateFlow<List<Video>> = _videos.asStateFlow()
+    private val _allVideos = MutableStateFlow<List<Video>>(emptyList())
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _sortMode = MutableStateFlow(SortMode.DATE_ADDED)
+    val sortMode: StateFlow<SortMode> = _sortMode.asStateFlow()
+
+    val videos: StateFlow<List<Video>> = combine(_allVideos, _searchQuery, _sortMode) { all, query, sort ->
+        val filtered = if (query.isBlank()) all else all.filter { it.title.contains(query, ignoreCase = true) }
+        when (sort) {
+            SortMode.DATE_ADDED -> filtered.sortedByDescending { it.dateAdded }
+            SortMode.NAME -> filtered.sortedBy { it.title.lowercase() }
+            SortMode.DURATION -> filtered.sortedByDescending { it.durationMs }
+            SortMode.SIZE -> filtered.sortedByDescending { it.sizeBytes }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _isSelectionMode = MutableStateFlow(false)
+    val isSelectionMode: StateFlow<Boolean> = _isSelectionMode.asStateFlow()
+
+    private val _selectedIds = MutableStateFlow<Set<Long>>(emptySet())
+    val selectedIds: StateFlow<Set<Long>> = _selectedIds.asStateFlow()
 
     private val _currentVideo = MutableStateFlow<Video?>(null)
     val currentVideo: StateFlow<Video?> = _currentVideo.asStateFlow()
@@ -55,9 +81,6 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
     private val lastPositions = mutableMapOf<Long, Long>()
 
-    // Guards the position shown to the UI right after a manual seek, so the
-    // polling loop below can never briefly report a stale/older position
-    // and make the progress bar appear to jump backwards.
     private var pendingSeekTarget: Long = -1L
     private var pendingSeekUntil: Long = 0L
 
@@ -76,12 +99,9 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (pendingSeekTarget >= 0L) {
                     if (actual >= pendingSeekTarget - 300 || now > pendingSeekUntil) {
-                        // Playback has genuinely caught up to (or past) the seek
-                        // target, or the guard window expired — trust the player again.
                         pendingSeekTarget = -1L
                         _positionMs.value = actual
                     } else {
-                        // Keep showing the seek target until playback catches up.
                         _positionMs.value = pendingSeekTarget
                     }
                 } else {
@@ -105,7 +125,7 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
                 prefetchThumbnails(result.take(preloadCount), imageLoader)
             }
 
-            _videos.value = result
+            _allVideos.value = result
             _isLoading.value = false
         }
     }
@@ -127,6 +147,40 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setSearchQuery(query: String) {
+        _searchQuery.value = query
+    }
+
+    fun setSortMode(mode: SortMode) {
+        _sortMode.value = mode
+    }
+
+    fun enterSelectionMode(initialId: Long) {
+        _isSelectionMode.value = true
+        _selectedIds.value = setOf(initialId)
+    }
+
+    fun toggleSelection(id: Long) {
+        val current = _selectedIds.value
+        val updated = if (id in current) current - id else current + id
+        _selectedIds.value = updated
+        if (updated.isEmpty()) _isSelectionMode.value = false
+    }
+
+    fun selectAll() {
+        _selectedIds.value = videos.value.map { it.id }.toSet()
+    }
+
+    fun clearSelection() {
+        _isSelectionMode.value = false
+        _selectedIds.value = emptySet()
+    }
+
+    fun removeDeletedVideos(ids: Set<Long>) {
+        _allVideos.value = _allVideos.value.filterNot { it.id in ids }
+        clearSelection()
+    }
+
     fun playVideo(video: Video) {
         pendingSeekTarget = -1L
         _currentVideo.value = video
@@ -140,19 +194,19 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun playNext() {
-        val list = _videos.value
+        val list = videos.value
         val idx = list.indexOfFirst { it.id == _currentVideo.value?.id }
         if (idx in 0 until list.size - 1) playVideo(list[idx + 1])
     }
 
     fun playPrevious() {
-        val list = _videos.value
+        val list = videos.value
         val idx = list.indexOfFirst { it.id == _currentVideo.value?.id }
         if (idx > 0) playVideo(list[idx - 1])
     }
 
     private fun updateNavAvailability() {
-        val list = _videos.value
+        val list = videos.value
         val idx = list.indexOfFirst { it.id == _currentVideo.value?.id }
         _hasNext.value = idx in 0 until list.size - 1
         _hasPrevious.value = idx > 0
