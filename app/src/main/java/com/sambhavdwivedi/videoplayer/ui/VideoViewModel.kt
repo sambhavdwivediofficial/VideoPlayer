@@ -54,22 +54,16 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     val hasPrevious: StateFlow<Boolean> = _hasPrevious.asStateFlow()
 
     private val lastPositions = mutableMapOf<Long, Long>()
-    private var isSeeking = false
+
+    // Guards the position shown to the UI right after a manual seek, so the
+    // polling loop below can never briefly report a stale/older position
+    // and make the progress bar appear to jump backwards.
+    private var pendingSeekTarget: Long = -1L
+    private var pendingSeekUntil: Long = 0L
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _isPlaying.value = isPlaying
-        }
-
-        override fun onPositionDiscontinuity(
-            oldPosition: Player.PositionInfo,
-            newPosition: Player.PositionInfo,
-            reason: Int
-        ) {
-            if (reason == Player.DISCONTINUITY_REASON_SEEK) {
-                _positionMs.value = newPosition.positionMs.coerceAtLeast(0L)
-                isSeeking = false
-            }
         }
     }
 
@@ -77,10 +71,24 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
         player.addListener(playerListener)
         viewModelScope.launch {
             while (true) {
-                if (!isSeeking) {
-                    _positionMs.value = player.currentPosition.coerceAtLeast(0L)
-                    _durationMs.value = player.duration.coerceAtLeast(0L)
+                val now = System.currentTimeMillis()
+                val actual = player.currentPosition.coerceAtLeast(0)
+
+                if (pendingSeekTarget >= 0L) {
+                    if (actual >= pendingSeekTarget - 300 || now > pendingSeekUntil) {
+                        // Playback has genuinely caught up to (or past) the seek
+                        // target, or the guard window expired — trust the player again.
+                        pendingSeekTarget = -1L
+                        _positionMs.value = actual
+                    } else {
+                        // Keep showing the seek target until playback catches up.
+                        _positionMs.value = pendingSeekTarget
+                    }
+                } else {
+                    _positionMs.value = actual
                 }
+
+                _durationMs.value = player.duration.coerceAtLeast(0)
                 delay(200)
             }
         }
@@ -120,6 +128,7 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun playVideo(video: Video) {
+        pendingSeekTarget = -1L
         _currentVideo.value = video
         updateNavAvailability()
         val resumeFrom = lastPositions[video.id] ?: 0L
@@ -127,6 +136,7 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
         player.setMediaItem(mediaItem, resumeFrom)
         player.prepare()
         player.play()
+        _positionMs.value = resumeFrom
     }
 
     fun playNext() {
@@ -153,21 +163,19 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun seekTo(ms: Long) {
-        val duration = player.duration
-        val target = if (duration > 0) ms.coerceIn(0, duration) else ms.coerceAtLeast(0)
-        isSeeking = true
-        _positionMs.value = target
+        val target = ms.coerceAtLeast(0)
+        pendingSeekTarget = target
+        pendingSeekUntil = System.currentTimeMillis() + 1200
         player.seekTo(target)
+        _positionMs.value = target
     }
 
     fun seekBy(deltaMs: Long) {
-        val duration = player.duration
-        val target = (player.currentPosition + deltaMs).let {
-            if (duration > 0) it.coerceIn(0, duration) else it.coerceAtLeast(0)
-        }
-        isSeeking = true
-        _positionMs.value = target
+        val target = (player.currentPosition + deltaMs).coerceAtLeast(0)
+        pendingSeekTarget = target
+        pendingSeekUntil = System.currentTimeMillis() + 1200
         player.seekTo(target)
+        _positionMs.value = target
     }
 
     fun setPlaybackSpeed(speed: Float) {
@@ -182,6 +190,7 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun stopPlayback() {
         _currentVideo.value?.let { lastPositions[it.id] = player.currentPosition }
+        pendingSeekTarget = -1L
         player.stop()
         player.clearMediaItems()
         _currentVideo.value = null
