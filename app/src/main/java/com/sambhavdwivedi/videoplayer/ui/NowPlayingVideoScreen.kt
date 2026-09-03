@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -94,20 +95,19 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import coil.ImageLoader
 import coil.compose.AsyncImage
-import coil.decode.VideoFrameDecoder
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-private data class SeekFeedback(val forward: Boolean, val amount: Int, val stamp: Long)
+private data class SeekFeedback(val forward: Boolean, val stamp: Long)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
     val video by viewModel.currentVideo.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
+    val isBuffering by viewModel.isBuffering.collectAsState()
     val positionMs by viewModel.positionMs.collectAsState()
     val durationMs by viewModel.durationMs.collectAsState()
     val playbackSpeed by viewModel.playbackSpeed.collectAsState()
@@ -116,14 +116,12 @@ fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
     val allVideos by viewModel.videos.collectAsState()
 
     var controlsVisible by rememberSaveable { mutableStateOf(true) }
-    var isScrubbing by remember { mutableStateOf(false) }
-    var scrubPosition by remember { mutableFloatStateOf(0f) }
+    var isDragging by remember { mutableStateOf(false) }
+    var dragPosition by remember { mutableFloatStateOf(0f) }
     var isLocked by rememberSaveable { mutableStateOf(false) }
     var showSpeedSheet by remember { mutableStateOf(false) }
     var resizeMode by rememberSaveable { mutableStateOf(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
-    
     var seekFeedback by remember { mutableStateOf<SeekFeedback?>(null) }
-    var cumulativeSeekAmount by remember { mutableStateOf(0) }
 
     var showVolumeHud by remember { mutableStateOf(false) }
     var showBrightnessHud by remember { mutableStateOf(false) }
@@ -169,9 +167,8 @@ fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
 
     LaunchedEffect(seekFeedback) {
         if (seekFeedback != null) {
-            delay(800)
+            delay(650)
             seekFeedback = null
-            cumulativeSeekAmount = 0
         }
     }
 
@@ -194,19 +191,16 @@ fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
                             onTap = { controlsVisible = !controlsVisible },
                             onDoubleTap = { offset ->
                                 val third = size.width / 3f
-                                val isForward = offset.x > third * 2
-                                val isBackward = offset.x < third
-                                
-                                if (isForward || isBackward) {
-                                    if (seekFeedback?.forward == isForward) {
-                                        cumulativeSeekAmount += 10
-                                    } else {
-                                        cumulativeSeekAmount = 10
+                                when {
+                                    offset.x < third -> {
+                                        viewModel.seekBy(-10_000)
+                                        seekFeedback = SeekFeedback(false, System.currentTimeMillis())
                                     }
-                                    viewModel.seekBy(if (isForward) 10_000 else -10_000)
-                                    seekFeedback = SeekFeedback(isForward, cumulativeSeekAmount, System.currentTimeMillis())
-                                } else {
-                                    viewModel.togglePlayPause()
+                                    offset.x > third * 2 -> {
+                                        viewModel.seekBy(10_000)
+                                        seekFeedback = SeekFeedback(true, System.currentTimeMillis())
+                                    }
+                                    else -> viewModel.togglePlayPause()
                                 }
                             }
                         )
@@ -324,6 +318,14 @@ fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
                 }
             }
 
+            if (isBuffering) {
+                CircularProgressIndicator(
+                    color = Color.White,
+                    strokeWidth = 3.dp,
+                    modifier = Modifier.align(Alignment.Center).size(42.dp)
+                )
+            }
+
             if (showVolumeHud) {
                 GestureHud(icon = Icons.Filled.VolumeUp, percent = volumeLevel / maxVolume.toFloat(), modifier = Modifier.align(Alignment.Center))
             }
@@ -353,7 +355,7 @@ fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
                             tint = Color.White,
                             modifier = Modifier.size(34.dp)
                         )
-                        Text("${fb.amount}s", color = Color.White, fontSize = 12.sp)
+                        Text("10s", color = Color.White, fontSize = 12.sp)
                     }
                 }
             }
@@ -420,13 +422,8 @@ fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
                             Icon(Icons.Filled.SkipPrevious, contentDescription = "Previous", tint = if (hasPrevious) Color.White else Color(0x55FFFFFF), modifier = Modifier.size(30.dp))
                         }
                         IconButton(onClick = {
-                            if (seekFeedback?.forward == false) {
-                                cumulativeSeekAmount += 10
-                            } else {
-                                cumulativeSeekAmount = 10
-                            }
                             viewModel.seekBy(-10_000)
-                            seekFeedback = SeekFeedback(false, cumulativeSeekAmount, System.currentTimeMillis())
+                            seekFeedback = SeekFeedback(false, System.currentTimeMillis())
                         }) {
                             Icon(Icons.Filled.Replay10, contentDescription = "Rewind 10s", tint = Color.White, modifier = Modifier.size(30.dp))
                         }
@@ -441,13 +438,8 @@ fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
                         }
                         Spacer(Modifier.padding(horizontal = 10.dp))
                         IconButton(onClick = {
-                            if (seekFeedback?.forward == true) {
-                                cumulativeSeekAmount += 10
-                            } else {
-                                cumulativeSeekAmount = 10
-                            }
                             viewModel.seekBy(10_000)
-                            seekFeedback = SeekFeedback(true, cumulativeSeekAmount, System.currentTimeMillis())
+                            seekFeedback = SeekFeedback(true, System.currentTimeMillis())
                         }) {
                             Icon(Icons.Filled.Forward10, contentDescription = "Forward 10s", tint = Color.White, modifier = Modifier.size(30.dp))
                         }
@@ -458,22 +450,15 @@ fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
 
                     Spacer(Modifier.height(8.dp))
 
-                    val sliderValue = if (isScrubbing) scrubPosition
+                    val sliderValue = if (isDragging) dragPosition
                     else if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()) else 0f
 
-                        Slider(
+                    Slider(
                         value = sliderValue.coerceIn(0f, 1f),
-                        onValueChange = { 
-                            isScrubbing = true
-                            scrubPosition = it 
-                        },
+                        onValueChange = { isDragging = true; dragPosition = it },
                         onValueChangeFinished = {
-                            viewModel.seekTo((scrubPosition * durationMs).toLong())
-                            coroutineScope.launch {
-                                // Wait a bit more to ensure the player has processed the seek
-                                delay(400)
-                                isScrubbing = false
-                            }
+                            viewModel.seekTo((dragPosition * durationMs).toLong())
+                            isDragging = false
                         },
                         colors = SliderDefaults.colors(
                             thumbColor = Color.White,
@@ -482,7 +467,7 @@ fun NowPlayingVideoScreen(viewModel: VideoViewModel, onBack: () -> Unit) {
                         )
                     )
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(text = formatMs(if (isScrubbing) (scrubPosition * durationMs).toLong() else positionMs), color = Color.White, fontSize = 12.sp)
+                        Text(text = formatMs(if (isDragging) (dragPosition * durationMs).toLong() else positionMs), color = Color.White, fontSize = 12.sp)
                         Text(text = formatMs(durationMs), color = Color.White, fontSize = 12.sp)
                     }
                 }
@@ -597,13 +582,13 @@ private fun SpeedRuler(speed: Float, onSpeedChange: (Float) -> Unit) {
             textAlign = android.graphics.Paint.Align.CENTER
         }
 
-        for (i in 5..60) { // 0.25 to 3.0
+        for (i in 5..60) {
             val v = i * 0.05f
             val x = centerX + (v - speed) * pxPerUnit
             if (x in -50f..size.width + 50f) {
-                val isMajor = i % 10 == 0 // 0.5, 1.0, 1.5 ...
-                val isMid = i % 2 == 0   // 0.1, 0.2, 0.3 ...
-                
+                val isMajor = i % 10 == 0
+                val isMid = i % 2 == 0
+
                 val topStart = size.height * 0.1f
                 val lineHeight = when {
                     isMajor -> size.height * 0.55f
